@@ -1,4 +1,5 @@
 # %%
+from random import uniform
 import numpy as np
 from IPython import embed
 import scipy.special as sp
@@ -27,11 +28,11 @@ class GammaDistribution(PDFunction):
 
     def __call__(self, t):
         a, b = self.params
-        return b**a / (sp.gamma(a)) * t**(a - 1) * np.e**(-b * t)
+        return b**a / (sp.gamma(a)) * t**(a - 1) * np.e**(-b * t)  
 
     def em_step(self, arr, prob):
         target = np.log((prob * arr).sum() / prob.sum()) - (prob * np.log(arr)).sum() / prob.sum()
-        coef = prob.sum() / (prob * arr).sum()
+        coef = prob.sum() / np.maximum((prob * arr).sum(), 1e-8)
         func = lambda x: np.log(x) - sp.digamma(x) - target
         jac = lambda x: 1 / x - sp.gamma(x)
         root = opt.root(func, self.params[0], jac=jac)
@@ -67,11 +68,16 @@ class FitRunner:
         self.data_arr: np.ndarray = arr
         self.weight = 0.5
         dist_cls_a, args_a = distribution[0]
+        self.dist_cls_a = dist_cls_a
         self.dist_a: PDFunction = dist_cls_a(*args_a)
         dist_cls_b, args_b = distribution[1]
+        self.dist_cls_b = dist_cls_b
         self.dist_b: PDFunction = dist_cls_b(*args_b)
+        self.best_err = np.float('inf')
+        self.opt_params_a = None
+        self.opt_params_b = None
 
-    def fit(self, step=50, visualize=False, quiet=False):
+    def fit(self, step=50, visualize=False, quiet=False, save=None, opt=True):
         for i in range(step):
             calc = lambda x: self.weight * self.dist_a(x) + (1 - self.weight) * self.dist_b(x)
             if not quiet:
@@ -79,7 +85,7 @@ class FitRunner:
                 print(self)
                 print(f"Error: {error_pdf(calc, self.data_arr)}")
             if visualize:
-                self.visualize()
+                self.visualize(save)
             pdf_a = self.dist_a(self.data_arr)
             pdf_b = self.dist_b(self.data_arr)
             pdf_sum = self.weight * pdf_a + (1 - self.weight) * pdf_b
@@ -88,6 +94,14 @@ class FitRunner:
             self.weight = prob_a.sum() / len(prob_a)
             self.dist_a.em_step(self.data_arr, prob_a)
             self.dist_b.em_step(self.data_arr, prob_b)
+            error = self.error()
+            if error < self.best_err:
+                self.best_err = error
+                self.opt_params_a = np.copy(self.dist_a.params)
+                self.opt_params_b = np.copy(self.dist_b.params)
+        if opt:
+            self.dist_a = self.dist_cls_a(*self.opt_params_a)
+            self.dist_b = self.dist_cls_b(*self.opt_params_b)
 
     def error(self, steps=50000):
         y = np.histogram(self.data_arr, bins=steps, density=True)[0]
@@ -95,14 +109,22 @@ class FitRunner:
         z = self.dist_a(x) * self.weight + self.dist_b(x) * (1 - self.weight)
         return np.abs(y - z).mean()
 
-    def visualize(self):
+    def visualize(self, save=None):
         plt.hist(self.data_arr, bins=1000, alpha=0.5, density=True)
         calc = lambda x: (self.weight * self.dist_a(x) + (1 - self.weight) * self.dist_b(x))
         visualize_pdf(calc, (self.data_arr.min(), self.data_arr.max()))
         visualize_pdf(lambda x: self.weight * self.dist_a(x), (self.data_arr.min(), self.data_arr.max()), color='red')
         visualize_pdf(lambda x: (1 - self.weight) * self.dist_b(x), (self.data_arr.min(), self.data_arr.max()),
                       color='blue')
-        plt.show()
+        if save is None:
+            plt.show()
+            plt.cla()
+        else:
+            plt.savefig(save)
+            plt.cla()
+
+    def judge(self, arr):
+        return self.weight * self.dist_a(arr) > (1 - self.weight) * self.dist_b(arr)
 
     def __str__(self) -> str:
         return (f'Distribution 1 params: {self.dist_a.params}\n') + (
@@ -129,30 +151,35 @@ def fit_gamma(arr):
             mask_label.append(True)
     return mask_label
 
-# # %%
-# # Data preparation
+# %%
+# Data preparation
 # arr = np.load('test.npy')
 # arr = np.abs(arr)
+a1, b1 = 2, 200
+a2, b2 = 50, 50
+weight = 0.5
+arr = np.array([np.random.gamma(a1, 1/b1) if np.random.uniform(0, 1) < weight else np.random.gamma(a2, 1/b2)  for _ in range(50000)])
 
-# # %%
-# # Initial params
-# a1, b1 = 2, 100
-# a2, b2 = 49, 100
-# weight = 0.5
-# dist_cls = GammaDistribution
-# bins = 500
+# %%
+# Initial params
+a1, b1 = 2, 200
+a2, b2 = 50, 50
+weight = 0.5
+dist_cls = GammaDistribution
+bins = 500
 
-# # %%
-# # Visualize data
+# %%
+# Visualize data
 # plt.hist(arr, bins=bins, alpha=0.5, density=True, stacked=True)
-# dist_a, dist_b = dist_cls(a1, b1), dist_cls(a2, b2)
-# visualize_pdf(lambda x: (1 - weight) * dist_b(x), (arr.min(), arr.max()), color='blue')
-# visualize_pdf(lambda x: weight * dist_a(x) + (1 - weight) * dist_b(x), (arr.min(), arr.max()), color='green')
-# plt.show()
-# # %%
-# # Fitting
-# runner = FitRunner([(dist_cls, (a1, b1)), (dist_cls, (a2, b2))], arr)
-# runner.fit(quiet=True)
-# print(runner)
+dist_a, dist_b = dist_cls(a1, b1), dist_cls(a2, b2)
+visualize_pdf(lambda x: weight * dist_a(x), (arr.min(), arr.max()), color='green')
+visualize_pdf(lambda x: (1 - weight) * dist_b(x), (arr.min(), arr.max()), color='blue')
+plt.show()
+# %%
+# Fitting
+runner = FitRunner([(dist_cls, (a1, b1)), (dist_cls, (a2, b2))], arr)
+runner.fit(quiet=True)
+runner.visualize()
+print(runner)
 
-# # %%
+# %%
