@@ -33,6 +33,8 @@ from models.ap_helper_pq import APCalculator, parse_predictions, parse_groundtru
 
 from tqdm import tqdm
 
+import fit
+
 def parse_option():
     parser = argparse.ArgumentParser()
     # Model
@@ -347,37 +349,18 @@ def evaluate_one_epoch(test_loader, DATASET_CONFIG, CONFIG_DICT, AP_IOU_THRESHOL
             for b in range(end_points['point_clouds'].shape[0]):
                 pc_scene = end_points['point_clouds'][b]
                 semantic_labels = end_points['semantic_labels'][b]
-
                 predicted_quads = batch_pred_quad_corner[b]
-
-                # Filter out all points inside predicted quads
-
-                for predicted_quad in predicted_quads:
-                    lower_bound = np.min(predicted_quad, axis=0)
-                    upper_bound = np.max(predicted_quad, axis=0)
-
-                    outside = np.zeros(shape=(pc_scene.shape[0], ))
-
-                    for i in range(3):
-                        outside[torch.logical_or(pc_scene[:, i] < lower_bound[i], upper_bound[i] < pc_scene[:, i]).cpu().numpy()] = 1
-
-                    # pc_scene: (#num_points, 3) -> (#num_points_not_in_predicted_quad, 3)
-                    # pc_scene = pc_scene[np.argwhere(outside > 0).reshape(-1), :]
-                    # semantic_labels = semantic_labels[np.argwhere(outside > 0).reshape(-1)]
-
-
-
                 pc_center = torch.mean(pc_scene, dim=0).cpu().numpy()  # To find the inner side of the point clouds
 
-                # pc_wall_scene = pc_scene[semantic_labels == 1]
+                # Filter of points with labels of door/wall/window
                 mask = semantic_labels == 1
                 mask = torch.bitwise_or(mask, semantic_labels == 8)
                 mask = torch.bitwise_or(mask, semantic_labels == 9)
+
                 distance = 10.0 + np.zeros(shape=(pc_scene.shape[0], ))
                 scores_points = 0 + np.zeros(shape=(pc_scene.shape[0], ))
 
                 # Calculate distances
-                
                 indices = np.zeros(shape=(pc_scene.shape[0], ))
                 for idx, predicted_quad in enumerate(predicted_quads):
                     quad_center = np.mean(predicted_quad, axis=0)
@@ -398,11 +381,63 @@ def evaluate_one_epoch(test_loader, DATASET_CONFIG, CONFIG_DICT, AP_IOU_THRESHOL
                 scores_points_wall = scores_points[mask.cpu().numpy()]
                 indices_wall = indices[mask.cpu().numpy()]
 
-                os.makedirs('statistics_tbw_2d_1', exist_ok=True)
-                plt.cla()
-                for idx in range(len(predicted_quads)):
-                    plt.hist(distance_wall[indices_wall == idx], bins=1000, alpha=0.5, histtype='step', color=[random.randint(0, 255)/256 for _ in range(3)])
-                plt.savefig(f'statistics_tbw_2d_1/distribution-{end_points["scan_idx"][b].item()}.png')
+                # A. filter all distance directly
+                runner = fit.FitRunner([(fit.GammaDistribution, (2,200)), (fit.GammaDistribution, (50,50))], np.abs(distance_wall))
+                runner.fit(step=20, quiet=True, visualize=False, save='test.png')
+                # runner.visualize(save='test.png')
+                mask_second_a = runner.judge(distance_wall)
+                mask_a = np.zeros(shape=(pc_scene.shape[0], )).astype(np.bool)
+                mask_a[mask.cpu()] = mask_second_a
+
+                d2c = lambda d: ((128 + min(1, d) * 127)/255, (255-min(1, d) * 127)/255, 1.)
+
+                os.makedirs('statistics_tbw_per_quad', exist_ok=True)
+                with open(f'statistics_tbw_per_quad/{end_points["scan_idx"][b].item()}original.txt', 'w') as f:
+                    for i in range(len(pc_scene)):
+                        if mask[i]:
+                            color = d2c(np.abs(distance[i]))
+                        else:
+                            color = (64/256,64/256,64/256)
+                        print(f"{pc_scene[i][0]} {pc_scene[i][1]} {pc_scene[i][2]} {color[0]} {color[1]} {color[2]}", file=f)
+
+                os.makedirs('statistics_tbw_per_quad', exist_ok=True)
+                with open(f'statistics_tbw_per_quad/{end_points["scan_idx"][b].item()}a.txt', 'w') as f:
+                    for i in range(len(pc_scene)):
+                        if mask_a[i]:
+                            color = d2c(np.abs(distance[i]))
+                        elif mask[i]:
+                            color = (128/256, 128/256, 128/256)
+                        else:
+                            color = (64/256,64/256,64/256)
+                        print(f"{pc_scene[i][0]} {pc_scene[i][1]} {pc_scene[i][2]} {color[0]} {color[1]} {color[2]}", file=f)
+
+                # B. filter each quad independently
+                mask_b = np.zeros(shape=(pc_scene.shape[0], )).astype(np.bool)
+                for idx, predicted_quad in enumerate(predicted_quads):
+                    and_mask = np.logical_and(mask.cpu().numpy(), indices==idx)
+                    distance_quad = distance[and_mask]
+                    runner = fit.FitRunner([(fit.GammaDistribution, (2,200)), (fit.GammaDistribution, (50,50))], np.abs(distance_quad))
+                    runner.fit(step=20, quiet=True, visualize=False, save=f'test{idx}.png')
+                    # runner.visualize(save=f'test{idx}.png')
+                    mask_second_b = runner.judge(distance_quad)
+                    mask_b[and_mask] = mask_second_b
+                print("========================")
+                print(distance[mask_a].mean())
+                print(distance[mask_b].mean())
+                # embed()
+
+                os.makedirs('statistics_tbw_per_quad', exist_ok=True)
+                with open(f'statistics_tbw_per_quad/{end_points["scan_idx"][b].item()}b.txt', 'w') as f:
+                    for i in range(len(pc_scene)):
+                        if mask_b[i]:
+                            color = d2c(np.abs(distance[i]))
+                        elif mask[i]:
+                            color = (128/256, 128/256, 128/256)
+                        else:
+                            color = (64/256,64/256,64/256)
+                        print(f"{pc_scene[i][0]} {pc_scene[i][1]} {pc_scene[i][2]} {color[0]} {color[1]} {color[2]}", file=f)
+
+
                 # embed()
 
             if config.dump_result:
